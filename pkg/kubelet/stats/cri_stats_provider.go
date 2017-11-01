@@ -107,11 +107,24 @@ func (p *criStatsProvider) ListPodStats() ([]statsapi.PodStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list all container stats: %v", err)
 	}
+
+	glog.Infof("Cadvisor stats: {%+v}", caInfos)
+	caInfos, err := getCRICadvisorStats(p.cadvisor)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container info from cadvisor: %v", err)
+	}
+
 	for _, stats := range resp {
 		containerID := stats.Attributes.Id
 		container, found := containerMap[containerID]
 		if !found {
 			glog.Errorf("Unknown id %q in container map.", containerID)
+			continue
+		}
+
+		caStats, found := caInfos[containerID]
+		if !found {
+			glog.Errorf("Unable to find cadvisor stats for %q", containerID)
 			continue
 		}
 
@@ -126,10 +139,15 @@ func (p *criStatsProvider) ListPodStats() ([]statsapi.PodStats, error) {
 		// container belongs to.
 		ps, found := sandboxIDToPodStats[podSandboxID]
 		if !found {
-			ps = p.makePodStats(podSandbox)
+			caPodSandbox, found := caInfos[podSandboxID]
+			if !found {
+				glog.Errorf("Unable to find cadvisor stats for sandbox %q", podSandboxID)
+				continue
+			}
+			ps = p.makePodStats(podSandbox, caPodSandbox)
 			sandboxIDToPodStats[podSandboxID] = ps
 		}
-		ps.Containers = append(ps.Containers, *p.makeContainerStats(stats, container, &rootFsInfo, uuidToFsInfo))
+		ps.Containers = append(ps.Containers, *p.makeContainerStats(stats, container, &rootFsInfo, uuidToFsInfo, caStats))
 	}
 
 	result := make([]statsapi.PodStats, 0, len(sandboxIDToPodStats))
@@ -194,7 +212,10 @@ func (p *criStatsProvider) getFsInfo(storageID *runtimeapi.StorageIdentifier) *c
 	return &fsInfo
 }
 
-func (p *criStatsProvider) makePodStats(podSandbox *runtimeapi.PodSandbox) *statsapi.PodStats {
+func (p *criStatsProvider) makePodStats(
+	podSandbox *runtimeapi.PodSandbox,
+	caPodSandbox *cadvisorapiv2.ContainerInfo,
+) *statsapi.PodStats {
 	s := &statsapi.PodStats{
 		PodRef: statsapi.PodReference{
 			Name:      podSandbox.Metadata.Name,
@@ -203,7 +224,7 @@ func (p *criStatsProvider) makePodStats(podSandbox *runtimeapi.PodSandbox) *stat
 		},
 		// The StartTime in the summary API is the pod creation time.
 		StartTime: metav1.NewTime(time.Unix(0, podSandbox.CreatedAt)),
-		// Network stats are not supported by CRI.
+		Network:   cadvisorInfoToNetworkStats(caPodSandbox.Name, caPodSandbox),
 	}
 	podUID := types.UID(s.PodRef.UID)
 	if vstats, found := p.resourceAnalyzer.GetPodVolumeStats(podUID); found {
@@ -217,6 +238,7 @@ func (p *criStatsProvider) makeContainerStats(
 	container *runtimeapi.Container,
 	rootFsInfo *cadvisorapiv2.FsInfo,
 	uuidToFsInfo map[runtimeapi.StorageIdentifier]*cadvisorapiv2.FsInfo,
+	caPodStats *cadvisorapiv2.ContainerInfo,
 ) *statsapi.ContainerStats {
 	result := &statsapi.ContainerStats{
 		Name: stats.Attributes.Metadata.Name,
@@ -242,18 +264,20 @@ func (p *criStatsProvider) makeContainerStats(
 			// TODO(yguo0905): Get this information from kubelet and
 			// populate the two fields here.
 		},
-		// UserDefinedMetrics is not supported by CRI.
 	}
-	if stats.Cpu != nil {
-		result.CPU.Time = metav1.NewTime(time.Unix(0, stats.Cpu.Timestamp))
-		if stats.Cpu.UsageCoreNanoSeconds != nil {
-			result.CPU.UsageCoreNanoSeconds = &stats.Cpu.UsageCoreNanoSeconds.Value
-		}
+	if caPodStats != nil {
+		result.UserDefinedMetrics = cadvisorInfoToUserDefinedMetrics(caPodStats)
 	}
-	if stats.Memory != nil {
-		result.Memory.Time = metav1.NewTime(time.Unix(0, stats.Memory.Timestamp))
-		if stats.Memory.WorkingSetBytes != nil {
-			result.Memory.WorkingSetBytes = &stats.Memory.WorkingSetBytes.Value
+	if caPodStats.Spec.HasCpu {
+		result.CPU = buildCPUStats(cstat)
+	}
+
+	if caPodStats.Spec.HasMemory {
+		result.Memory = buildMemoryStats(cstat)
+		// availableBytes = memory limit (if known) - workingset
+		if !isMemoryUnlimited(caPodStats.Spec.Memory.Limit) {
+			availableBytes := caPodStats.Spec.Memory.Limit - cstat.Memory.WorkingSet
+			result.Memory.AvailableBytes = &availableBytes
 		}
 	}
 	if stats.WritableLayer != nil {
@@ -285,4 +309,28 @@ func (p *criStatsProvider) makeContainerStats(
 	}
 
 	return result
+}
+
+func getCRICadvisorStats(ca cadvisor.Interface) (map[string]cadvisorapiv2.ContainerInfo, error) {
+	stats := make(map[string]cadvisorapiv2.ContainerInfo)
+	infos, err := getCadvisorContainerInfo(ca)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch cadvisor stats: %v", err)
+	}
+
+	for key, info := range infos {
+		// On systemd using devicemapper each mount into the container has an
+		// associated cgroup. We ignore them to ensure we do not get duplicate
+		// entries in our summary. For details on .mount units:
+		// http://man7.org/linux/man-pages/man5/systemd.mount.5.html
+		if strings.HasSuffix(key, ".mount") {
+			continue
+		}
+		// Build the Pod key if this container is managed by a Pod
+		if !isPodManagedContainer(&info) {
+			continue
+		}
+		stats[path.Base(key)] = info
+	}
+	return stats, nil
 }

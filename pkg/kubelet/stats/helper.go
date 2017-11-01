@@ -44,29 +44,11 @@ func cadvisorInfoToContainerStats(name string, info *cadvisorapiv2.ContainerInfo
 	}
 
 	if info.Spec.HasCpu {
-		cpuStats := statsapi.CPUStats{
-			Time: metav1.NewTime(cstat.Timestamp),
-		}
-		if cstat.CpuInst != nil {
-			cpuStats.UsageNanoCores = &cstat.CpuInst.Usage.Total
-		}
-		if cstat.Cpu != nil {
-			cpuStats.UsageCoreNanoSeconds = &cstat.Cpu.Usage.Total
-		}
-		result.CPU = &cpuStats
+		result.CPU = buildCPUStats(cstat)
 	}
 
 	if info.Spec.HasMemory {
-		pageFaults := cstat.Memory.ContainerData.Pgfault
-		majorPageFaults := cstat.Memory.ContainerData.Pgmajfault
-		result.Memory = &statsapi.MemoryStats{
-			Time:            metav1.NewTime(cstat.Timestamp),
-			UsageBytes:      &cstat.Memory.Usage,
-			WorkingSetBytes: &cstat.Memory.WorkingSet,
-			RSSBytes:        &cstat.Memory.RSS,
-			PageFaults:      &pageFaults,
-			MajorPageFaults: &majorPageFaults,
-		}
+		result.Memory = buildMemoryStats(cstat)
 		// availableBytes = memory limit (if known) - workingset
 		if !isMemoryUnlimited(info.Spec.Memory.Limit) {
 			availableBytes := info.Spec.Memory.Limit - cstat.Memory.WorkingSet
@@ -76,29 +58,12 @@ func cadvisorInfoToContainerStats(name string, info *cadvisorapiv2.ContainerInfo
 
 	if rootFs != nil {
 		// The container logs live on the node rootfs device
-		result.Logs = &statsapi.FsStats{
-			Time:           metav1.NewTime(cstat.Timestamp),
-			AvailableBytes: &rootFs.Available,
-			CapacityBytes:  &rootFs.Capacity,
-			InodesFree:     rootFs.InodesFree,
-			Inodes:         rootFs.Inodes,
-		}
-
-		if rootFs.Inodes != nil && rootFs.InodesFree != nil {
-			logsInodesUsed := *rootFs.Inodes - *rootFs.InodesFree
-			result.Logs.InodesUsed = &logsInodesUsed
-		}
+		result.Logs = buildLogsStats(cstat, rootFs)
 	}
 
 	if imageFs != nil {
 		// The container rootFs lives on the imageFs devices (which may not be the node root fs)
-		result.Rootfs = &statsapi.FsStats{
-			Time:           metav1.NewTime(cstat.Timestamp),
-			AvailableBytes: &imageFs.Available,
-			CapacityBytes:  &imageFs.Capacity,
-			InodesFree:     imageFs.InodesFree,
-			Inodes:         imageFs.Inodes,
-		}
+		result.Rootfs = buildRootfsStats(cstat, imageFs)
 	}
 
 	cfs := cstat.Filesystem
@@ -252,4 +217,56 @@ func getCgroupStats(cadvisor cadvisor.Interface, containerName string) (*cadviso
 		return nil, fmt.Errorf("failed to get latest stats from container info for %q", containerName)
 	}
 	return stats, nil
+}
+
+func buildCPUStats(cstat *cadvisorapiv2.ContainerStats) *statsapi.CPUStats {
+	cpuStats := statsapi.CPUStats{
+		Time: metav1.NewTime(cstat.Timestamp),
+	}
+	if cstat.CpuInst != nil {
+		cpuStats.UsageNanoCores = &cstat.CpuInst.Usage.Total
+	}
+	if cstat.Cpu != nil {
+		cpuStats.UsageCoreNanoSeconds = &cstat.Cpu.Usage.Total
+	}
+	return &cpuStats
+}
+
+func buildMemoryStats(cstat *cadvisorapiv2.ContainerStats) *statsapi.MemoryStats {
+	pageFaults := cstat.Memory.ContainerData.Pgfault
+	majorPageFaults := cstat.Memory.ContainerData.Pgmajfault
+	return &statsapi.MemoryStats{
+		Time:            metav1.NewTime(cstat.Timestamp),
+		UsageBytes:      &cstat.Memory.Usage,
+		WorkingSetBytes: &cstat.Memory.WorkingSet,
+		RSSBytes:        &cstat.Memory.RSS,
+		PageFaults:      &pageFaults,
+		MajorPageFaults: &majorPageFaults,
+	}
+}
+
+func buildLogsStats(cstat *cadvisorapiv2.ContainerStats, rootFs *cadvisorapiv2.FsInfo) *statsapi.FsStats {
+	fsStats := &statsapi.FsStats{
+		Time:           metav1.NewTime(cstat.Timestamp),
+		AvailableBytes: &rootFs.Available,
+		CapacityBytes:  &rootFs.Capacity,
+		InodesFree:     rootFs.InodesFree,
+		Inodes:         rootFs.Inodes,
+	}
+
+	if rootFs.Inodes != nil && rootFs.InodesFree != nil {
+		logsInodesUsed := *rootFs.Inodes - *rootFs.InodesFree
+		fsStats.InodesUsed = &logsInodesUsed
+	}
+	return fsStats
+}
+
+func buildRootfsStats(cstat *cadvisorapiv2.ContainerStats, imageFs *cadvisorapiv2.FsInfo) *statsapi.FsStats {
+	return &statsapi.FsStats{
+		Time:           metav1.NewTime(cstat.Timestamp),
+		AvailableBytes: &imageFs.Available,
+		CapacityBytes:  &imageFs.Capacity,
+		InodesFree:     imageFs.InodesFree,
+		Inodes:         imageFs.Inodes,
+	}
 }
