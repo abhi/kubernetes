@@ -74,23 +74,10 @@ func (p *cadvisorStatsProvider) ListPodStats() ([]statsapi.PodStats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get imageFs info: %v", err)
 	}
-
-	infos, err := p.cadvisor.ContainerInfoV2("/", cadvisorapiv2.RequestOptions{
-		IdType:    cadvisorapiv2.TypeName,
-		Count:     2, // 2 samples are needed to compute "instantaneous" CPU
-		Recursive: true,
-	})
+	infos, err := getCadvisorContainerInfo(p.cadvisor)
 	if err != nil {
-		if _, ok := infos["/"]; ok {
-			// If the failure is partial, log it and return a best-effort
-			// response.
-			glog.Errorf("Partial failure issuing cadvisor.ContainerInfoV2: %v", err)
-		} else {
-			return nil, fmt.Errorf("failed to get root cgroup stats: %v", err)
-		}
+		return nil, fmt.Errorf("failed to get container info from cadvisor: %v", err)
 	}
-
-	infos = removeTerminatedContainerInfo(infos)
 
 	// Map each container to a pod and update the PodStats with container data.
 	podToStats := map[statsapi.PodReference]*statsapi.PodStats{}
@@ -278,4 +265,23 @@ func hasMemoryAndCPUInstUsage(info *cadvisorapiv2.ContainerInfo) bool {
 		return false
 	}
 	return cstat.CpuInst.Usage.Total != 0 && cstat.Memory.RSS != 0
+}
+
+func getCadvisorContainerInfo(ca cadvisor.Interface) (map[string]ContainerInfo, error) {
+	infos, err := ca.ContainerInfoV2("/", cadvisorapiv2.RequestOptions{
+		IdType:    cadvisorapiv2.TypeName,
+		Count:     2, // 2 samples are needed to compute "instantaneous" CPU
+		Recursive: true,
+	})
+	if err != nil {
+		if _, ok := infos["/"]; ok {
+			// If the failure is partial, log it and return a best-effort
+			// response.
+			glog.Errorf("Partial failure issuing cadvisor.ContainerInfoV2: %v", err)
+		} else {
+			return nil, fmt.Errorf("failed to get root cgroup stats: %v", err)
+		}
+	}
+	infos = removeTerminatedContainerInfo(infos)
+	return infos, nil
 }
