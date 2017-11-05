@@ -18,6 +18,8 @@ package stats
 
 import (
 	"fmt"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -108,7 +110,6 @@ func (p *criStatsProvider) ListPodStats() ([]statsapi.PodStats, error) {
 		return nil, fmt.Errorf("failed to list all container stats: %v", err)
 	}
 
-	glog.Infof("Cadvisor stats: {%+v}", caInfos)
 	caInfos, err := getCRICadvisorStats(p.cadvisor)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get container info from cadvisor: %v", err)
@@ -144,10 +145,10 @@ func (p *criStatsProvider) ListPodStats() ([]statsapi.PodStats, error) {
 				glog.Errorf("Unable to find cadvisor stats for sandbox %q", podSandboxID)
 				continue
 			}
-			ps = p.makePodStats(podSandbox, caPodSandbox)
+			ps = p.makePodStats(podSandbox, &caPodSandbox)
 			sandboxIDToPodStats[podSandboxID] = ps
 		}
-		ps.Containers = append(ps.Containers, *p.makeContainerStats(stats, container, &rootFsInfo, uuidToFsInfo, caStats))
+		ps.Containers = append(ps.Containers, *p.makeContainerStats(stats, container, &rootFsInfo, uuidToFsInfo, &caStats))
 	}
 
 	result := make([]statsapi.PodStats, 0, len(sandboxIDToPodStats))
@@ -224,7 +225,7 @@ func (p *criStatsProvider) makePodStats(
 		},
 		// The StartTime in the summary API is the pod creation time.
 		StartTime: metav1.NewTime(time.Unix(0, podSandbox.CreatedAt)),
-		Network:   cadvisorInfoToNetworkStats(caPodSandbox.Name, caPodSandbox),
+		Network:   cadvisorInfoToNetworkStats(podSandbox.Metadata.Name, caPodSandbox),
 	}
 	podUID := types.UID(s.PodRef.UID)
 	if vstats, found := p.resourceAnalyzer.GetPodVolumeStats(podUID); found {
@@ -264,6 +265,10 @@ func (p *criStatsProvider) makeContainerStats(
 			// TODO(yguo0905): Get this information from kubelet and
 			// populate the two fields here.
 		},
+	}
+	cstat, found := latestContainerStats(caPodStats)
+	if !found {
+		return result
 	}
 	if caPodStats != nil {
 		result.UserDefinedMetrics = cadvisorInfoToUserDefinedMetrics(caPodStats)
@@ -317,7 +322,6 @@ func getCRICadvisorStats(ca cadvisor.Interface) (map[string]cadvisorapiv2.Contai
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch cadvisor stats: %v", err)
 	}
-
 	for key, info := range infos {
 		// On systemd using devicemapper each mount into the container has an
 		// associated cgroup. We ignore them to ensure we do not get duplicate

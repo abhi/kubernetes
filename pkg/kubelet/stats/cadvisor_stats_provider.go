@@ -267,7 +267,7 @@ func hasMemoryAndCPUInstUsage(info *cadvisorapiv2.ContainerInfo) bool {
 	return cstat.CpuInst.Usage.Total != 0 && cstat.Memory.RSS != 0
 }
 
-func getCadvisorContainerInfo(ca cadvisor.Interface) (map[string]ContainerInfo, error) {
+func getCadvisorContainerInfo(ca cadvisor.Interface) (map[string]cadvisorapiv2.ContainerInfo, error) {
 	infos, err := ca.ContainerInfoV2("/", cadvisorapiv2.RequestOptions{
 		IdType:    cadvisorapiv2.TypeName,
 		Count:     2, // 2 samples are needed to compute "instantaneous" CPU
