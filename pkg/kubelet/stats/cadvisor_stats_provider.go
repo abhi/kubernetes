@@ -282,5 +282,5 @@ func getCadvisorContainerInfo(ca cadvisor.Interface) (map[string]ContainerInfo, 
 			return nil, fmt.Errorf("failed to get root cgroup stats: %v", err)
 		}
 	}
-	return removeTerminatedContainerInfo(infos),nil
+	return removeTerminatedContainerInfo(infos), nil
 }
