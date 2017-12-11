@@ -83,13 +83,18 @@ func waitTillNPodsRunningOnNodes(c clientset.Interface, nodeNames sets.String, p
 		}
 
 		seen := sets.NewString()
+		nodeList := []string{}
 		for i := 0; i < len(nodeNames.List()); i++ {
-			seen = seen.Union(<-matchCh)
+			pList := <-matchCh
+			// If Pods are still running on the node , attach the node to node List
+			if l := len(pList); l > 0 {
+				seen = seen.Union(nodeNames[i] + ":" + fmt.Sprint(l))
+			}
 		}
 		if seen.Len() == targetNumPods {
 			return true, nil
 		}
-		framework.Logf("Waiting for %d pods to be running on the node; %d are currently running;", targetNumPods, seen.Len())
+		framework.Logf("Waiting for %d pods to be running on the node; %d are currently running on nodes %v", targetNumPods, seen.Len(), seen.List())
 		return false, nil
 	})
 }
